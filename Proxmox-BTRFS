@@ -1,0 +1,22 @@
+**********************************************
+**                                          **
+**  Proxmox with better than default BTRFS  **
+**                                          **
+**********************************************
+
+Installing proxmox with btrfs and subvolumes, snapper automated snapshots, and auto-grub...
+
+HW: 2 SSDs (sda, sdb) and 2 HDDs (sdc and sdd)
+Notes:
+- Will be setting-up proxmox on SDDs in RAID1 configuration.
+- HDDs will be set-up later after system is up and running and are NOT required for installation.
+- If you have only single SSD or HDD, go along this guide, only choose RAID0 during setup. Later I'll show you how to change it to single...
+
+1) Start Proxmox installer and proceed the usual way until partitioning.
+2) For partition, choose BTRFS file system, RAID 1 configuration.
+3) Deselect all disks, and then for Disk 1 choose sda, and for Disk 2 choose sdb.
+4) On advanced options you may choose a compression if you wish. I went with zstd.
+5) Continue installation standard way and reboot.
+
+6) After reboot, do not go to browser as instructed. Stay in console, or you can ssh in as root with password you specified during installation.
+
