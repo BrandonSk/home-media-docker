@@ -1,2 +1,2 @@
-# home-media-docker
-A script to deploy various docker containers for managing home media (searching, renaming, organizing of movies, tv shows, songs, books, etc.)
+# Configs, scripts, and other stuff for memory
+Also contains grub-btrfs packaged into a deb file for installation on debian systems without the need to compile it.
