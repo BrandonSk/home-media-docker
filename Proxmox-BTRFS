@@ -18,5 +18,236 @@ Notes:
 4) On advanced options you may choose a compression if you wish. I went with zstd.
 5) Continue installation standard way and reboot.
 
-6) After reboot, do not go to browser as instructed. Stay in console, or you can ssh in as root with password you specified during installation.
+6) After reboot, do not go to browser as instructed. At this point, we need to reboot once more and instead of booting into the proxmox, we will boot into some Live CD distro, e.g. Ubuntu.
+Note: It is possible to perform what follows also on proxmox system, e.g. mounting / as read-only, create subvolumes, moving files, etc., but it becomes cumbersome, as fstab would have to be fixed either via grub-rescue or yet again another live cd. So the proposed way is in my opinion the easiest.
+
+Once booted into the live CD, run terminal and check, that we have btrfs filesystem available:
+```sh
+sudo btrfs filesystem show
+```
+```shell
+ubuntu@ubuntu:~$ sudo btrfs filesystem show
+Label: none  uuid: 0f3af461-d815-4129-8cea-43bb23ccd944
+	Total devices 2 FS bytes used 2.52GiB
+	devid    1 size 237.47GiB used 5.01GiB path /dev/sda3
+	devid    2 size 237.47GiB used 5.01GiB path /dev/sdb3
+```
+As you can see, proxmox has created filesystem on our two SSDs. As they are in RAID1, the structure is the same. The first two partitions on each ssd are BIOS boot and EFI system.
+
+What we will do next:
+1. Mount the file system into /mnt directory
+2. Create @ subvolume and mv all / data into it.
+3. Create additional subvolumes and mv data there.
+4. Modify fstab.
+5. Update grub.
+6. Reboot into our new system. 
+
+Step 1
+```sh
+sudo mount -t btrfs -o defaults /dev/disk/by-uuid/0f3af461-d815-4129-8cea-43bb23ccd944 /mnt
+ls /mnt
+```
+You should see structure of a / in your /mnt directory.
+
+Step 2
+```sh
+cd /mnt
+sudo btrfs subvolume create @
+sudo mv ./* @/
+sudo mv ./.* @/
+```
+Note: probably the first move command is sufficient as proxmox (as of now) does not have any hidden files or folders directly under /
+
+Step 3
+We will create a bunch of additional subvolumes. Why so many? The full explanation is beyond the scope of this article, but in simple terms - we are doing it because of snapshots. When doing snapshot of a subvolume in btrfs (let's say our root subvolume @), the snapshot will skip all data contained in other subvolume, regardless where they are mounted. So if I create separate subvolume @home for /home, then this does not get snapshot when I do snapshot of @, and vice versa. This conserves a lot of space. While of course you do want to do snapshots of @home (separately of course), you do not need to snapshot bunch of files in /var/log, /var/spool, etc... You get the point now.
+So let's go:
+```sh
+sudo btrfs subvolume create @snapshots
+sudo btrfs subvolume create @home
+sudo btrfs subvolume create @varlog
+sudo btrfs subvolume create @vartmp
+sudo btrfs subvolume create @varcache
+sudo btrfs subvolume create @varspool
+sudo btrfs subvolume create @tmp
+```
+You can check our subvolumes structure by issuing:
+```sh
+sudo btrfs subvolume list .
+```
+Do not worry about the subvolume @/var/lib/pve/local-btrfs which was created and is managed by proxmox itself.
+
+The @snapshots subvolume will hold our snapshots. But we do not have mountpoint (/.snapshots) for it yet, so let's create it. 
+```sh
+sudo mkdir -p ./@/.snapshots
+```
+Except for the just created .snapshots directory, we now need to move the content of all relevant directories into their file system subvolumes. Let's briefly explain - for now, all proxmox files sit under the @ subvolume (we moved them there in step 2). So for example the log files are in the ./@/var/log directory of the @ subvolume. This is not what we want. We will now move these files from ./@/var/log into the @varlog subvolume (think of it as a "partition", although it is not a partition) and then mount this @varlog subvolume into the @/var/log directory. Wait...WHAT?
+Yes, from proxmox system perspective, once we boot into proxmox, the files will still be located at this path /var/log. But from filesystem perspective, while the **directory** "/var/log" in the /var/log path is located in @ subvolume (again, think of it as "partition"), the **content** of /var/log is located in @varlog subvolume ("partition"). And later we will mount this content into the /var/log directory.
+So first, let's do the moving (we are still in /mnt !):
+```sh
+sudo mv ./@/var/log/* @varlog/
+sudo mv ./@/var/log/.* @varlog/
+```
+*(Note: we do 2 move commands, to make sure also the hidden files and folders are moved)*
+Now our @/var/log directory (which will become /var/log after reboot) is empty and all the log files are sitting "somewhere" in the filesystem. That somewhere (@varlog subvolume) will be mounted to the /var/log in fstab (see next step).
+Now let's move the rest and populate our subvolumes...
+```sh
+sudo mv ./@/home/* @home/
+sudo mv ./@/home/.* @home/
+sudo mv ./@/var/tmp/* @vartmp/
+sudo mv ./@/var/tmp/.* @vartmp/
+sudo mv ./@/var/cache/* @varcache/
+sudo mv ./@/var/cache/.* @varcache/
+sudo mv ./@/var/spool/* @varspool/
+sudo mv ./@/var/spool/.* @varspool/
+sudo mv ./@/tmp/* @tmp/
+sudo mv ./@/tmp/.* @tmp/
+```
+*Note: You may encouter errors/warnings when executing above commands about device/resource being busy. Just ignore them. It's triggered by the fact that there is nothing to move in some of the direcotries.*
+
+In the next step, we will modify fstab file to correctly mount these subvolumes to their repsective directories on next proxmox boot.
+
+Step 4
+We are still in /mnt
+Since we have moved all files from here to @ subvolume, out fstab file is not at this location ./@/etc/fstab
+```sh
+sudo nano ./@/etc/fstab
+```
+You should see content similar to this:
+```sh
+# <file system> <mount point> <type> <options> <dump> <pass>
+UUID=0f3af461-d815-4129-8cea-43bb23ccd944 / btrfs defaults,compress=zstd 0 1
+proc /proc proc defaults 0 0
+```
+The line that starts with UUID is the one that mounted our / after installation. We will first modify this line and then duplicate it 7 times to accommodate all of our subvolumes.
+
+So modify the line so it looks like this:
+# <file system> <mount point> <type> <options> <dump> <pass>
+```sh
+UUID=0f3af461-d815-4129-8cea-43bb23ccd944 / btrfs defaults,noatime,ssd,discard=async,compress=zstd,subvol=@ 0 1
+```
+Notice, that we have added these parameters in options column: noatime,ssd,discard=async,subvol=@
+If you have diferent preference, feel free to modify if you know what you're doing.
+One thing you cannot modify is the subvol=@ parameter. This is the magic part, where we are telling the system that the subvolume @ should be mounted as /
+It will be very similar for the remaining subvolumes.
+With cursor on the UUID line, press CTRL+K (if you are using nano) and then 8 times CTRL+U. The line will duplicate.
+Now move on the second line starting with UUID. Please note that UUID stays the same for all subvolumes. It is the id of the filesystem, in which our subvolumes reside. Modify each line so the result looks something like this:
+```sh
+UUID=0f3af461-d815-4129-8cea-43bb23ccd944 / btrfs defaults,noatime,ssd,discard=async,compress=zstd,subvol=@ 0 1
+UUID=0f3af461-d815-4129-8cea-43bb23ccd944 /.snapshots btrfs defaults,noatime,ssd,discard=async,compress=zstd,subvol=@snapshots 0 1
+UUID=0f3af461-d815-4129-8cea-43bb23ccd944 /home btrfs defaults,noatime,ssd,discard=async,compress=zstd,subvol=@home 0 1
+UUID=0f3af461-d815-4129-8cea-43bb23ccd944 /var/log btrfs defaults,noatime,ssd,discard=async,compress=zstd,subvol=@varlog 0 1
+UUID=0f3af461-d815-4129-8cea-43bb23ccd944 /var/cache btrfs defaults,noatime,ssd,discard=async,compress=zstd,subvol=@varcache 0 1
+UUID=0f3af461-d815-4129-8cea-43bb23ccd944 /var/spool btrfs defaults,noatime,ssd,discard=async,compress=zstd,subvol=@varspool 0 1
+UUID=0f3af461-d815-4129-8cea-43bb23ccd944 /var/tmp btrfs defaults,noatime,ssd,discard=async,compress=zstd,subvol=@vartmp 0 1
+UUID=0f3af461-d815-4129-8cea-43bb23ccd944 /tmp btrfs defaults,noatime,ssd,discard=async,compress=zstd,subvol=@tmp 0 1
+```
+Save the file and exit nano.
+So we are almost ready, but we need to tell grub that things have changed a little bit.
+
+Step 5
+First some preparation. We need to unmount currently mounted filesystem in /mnt and then mount the @ subvolume there:
+```sh
+cd /
+sudo umount -l /mnt
+# Mount the @ subvolume to /mnt/
+sudo mount /dev/disk/by-uuid/0f3af461-d815-4129-8cea-43bb23ccd944 /mnt/ -t btrfs -o subvol=@
+# For grub, we will need these additional mounts
+for i in dev dev/pts sys proc run; do sudo mount --bind /$i mnt/$i; done
+# UEFI ONLY
+# First check (sudo fdisk -l) where is your EFI partition. For me it is /dev/sda2
+sudo mount /dev/sda2 /mnt/boot/efi
+```
+
+Now we chroot into the /mnt to convice grub to do its job :)
+```sh
+sudo chroot /mnt
+# Reinstall boot loader
+grub-install
+# Update grub config
+update-grub
+# Leave chroot
+exit
+```
+
+Finally we should unmount our temporary mounts:
+```sh
+sudo umount /mnt/boot/efi
+for i in run proc sys dev/pts dev; do sudo umount mnt/$i; done
+sudo umount /mnt
+```
+
+And that should be it. Since you are in a live bistro, remove the installation media if needed and reboot!
+```sh
+sudo reboot
+```
+Stage IV - Back to Proxmox
+If all went well you should easily boot to proxmox.
+Stay in the console or ssh to the host.
+
+Lets verify, that everything works:
+```sh
+# Check subvolumes of root /
+root@hppl:~# btrfs subvolume list /
+ID 256 gen 23 top level 257 path var/lib/pve/local-btrfs
+ID 257 gen 417 top level 5 path @
+ID 258 gen 377 top level 5 path @snapshots
+ID 259 gen 382 top level 5 path @home
+ID 260 gen 417 top level 5 path @varlog
+ID 261 gen 399 top level 5 path @vartmp
+ID 262 gen 414 top level 5 path @varcache
+ID 263 gen 399 top level 5 path @varspool
+ID 264 gen 413 top level 5 path @tmp
+
+# Check mountpoints
+root@hppl:~# mount | grep @
+/dev/sda3 on / type btrfs (rw,noatime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=257,subvol=/@)
+/dev/sda3 on /.snapshots type btrfs (rw,noatime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=258,subvol=/@snapshots)
+/dev/sda3 on /home type btrfs (rw,noatime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=259,subvol=/@home)
+/dev/sda3 on /tmp type btrfs (rw,noatime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=264,subvol=/@tmp)
+/dev/sda3 on /var/cache type btrfs (rw,noatime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=262,subvol=/@varcache)
+/dev/sda3 on /var/tmp type btrfs (rw,noatime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=261,subvol=/@vartmp)
+/dev/sda3 on /var/log type btrfs (rw,noatime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=260,subvol=/@varlog)
+/dev/sda3 on /var/spool type btrfs (rw,noatime,compress=zstd:3,ssd,discard=async,space_cache=v2,subvolid=263,subvol=/@varspool)
+```
+What I like to do as very first thing is to manually snapshot a clean system.
+I do it for @ and @home subvolumes, but since we do not have any users yet, @ will suffice.
+I put manually created snapshots through btrfs into /.snapshost/manual-snaps/ directory
+The /.snapshots direcory will be used for auto snapshots done by snapper which we will configure shortly.
+
+```sh
+mkdir /.snapshots/manual-snaps
+root@hppl:~# btrfs subvolume snapshot -r / /.snapshots/manual-snaps/manual-root-$(date +%Y-%m-%d)-clean_install
+ls -lah /.snapshots/manual-snaps/
+```
+
+The very next thing I like to do is to install and configure Snapper. Snapper will make automatic snapshots of your subvolumes - no all, only those you define. It also has a neat feature to make snapshots right before and right after you run apt install command. That's why I install and configure it before installing any additional stuff via apt.
+
+So first thing is to install snapper.
+```sh
+apt install snapper
+```
+Next we need to do few adjustments...
+Courtesy of medium:
+The default way that snapper works is to automatically create a new subvolume “.snapshots” under the path of the subvolume that we are creating a snapshot. Because we want to keep our snapshots separated from the backed up subvolume itself we must remove the snapper created “.snapshot” subvolume and then re-mount using the one that we created before in a separate subvolume at @snapshots.
+We can do this by moving to the root directory, unmount the .snapshots directory and then remove it:
+```sh
+cd /
+umount .snapshots
+rm -r .snapshots
+```
+Do not worry. Despite the above, our manual snapshot we took earlier is still saved in @snapshots subvolume. Next we create a configuration for snapper for the / directory. That will also create .snapshot directory under / into which we will subsequently mount our @snapshots subvolume.
+```sh
+snapper -c root create-config /
+```
+Remove automatically created subvolume:
+```sh
+btrfs subvolume delete /.snapshots
+```
+Recreate the /.snapshots directory and remount our @snapshots subvolume into it:
+```sh
+mkdir /.snapshots
+mount -av
+```
+If you now look inside the /.snapshots directory you will see our manual snapshots directory and inside of it the manual snapshot we have taken earlier.
+Although this was a little cumbersome, now we have our setup as we want it and snapper is also happy.
 
