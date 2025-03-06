@@ -251,3 +251,106 @@ mount -av
 If you now look inside the /.snapshots directory you will see our manual snapshots directory and inside of it the manual snapshot we have taken earlier.
 Although this was a little cumbersome, now we have our setup as we want it and snapper is also happy.
 
+Let's do some modificatioins to how snapper works. All of these are optional and you may adjust them to your liking.
+1) No snapshots on boot. I do not want snapper to create a snapshot each time I boot, so I disable that timer.
+```sh
+systemctl disable snapper-boot.timer
+```
+2) Better apt snapshots.
+By default, snapper creates snapshots before and after running apt command. However, in the listings you only see "pre" and "post", but don't actually have a reference to which command was executed. A modification exists which will include the apt command description.
+```sh
+# change to /root directory
+cd
+# download the script file and make it executable
+wget -L https://gist.github.com/imthenachoman/f722f6d08dfb404fed2a3b2d83263118/raw/dpkg-pre-post-snapper.sh
+chmod +x ./dpkg-pre-post-snapper.sh
+# modify the configuration file for auto apt snapshots to refer to our downloaded script
+nano /etc/apt/apt.conf.d/80snapper
+```
+In this file, comment out the original lines (or delete them if you wish), and insert two new lines as below.
+*Note: if you saved the script elsewhere, not in /root, modify the path accordingly.*
+```sh
+# https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=770938
+#  DPkg::Pre-Invoke  { "if [ -e /etc/default/snapper ]; then . /etc/default/snapper; fi; if [ -x ...
+#  DPkg::Post-Invoke { "if [ -e /etc/default/snapper ]; then . /etc/default/snapper; fi; if [ -x ...
+DPkg::Pre-Invoke { "/root/dpkg-pre-post-snapper.sh pre"; };
+DPkg::Post-Invoke { "/root/dpkg-pre-post-snapper.sh post"; };
+```
+
+Following adjustments apply only to configuration for snapshots for / , thus "-c root". If you automate snapshots of another subvolume, e.g. @home, then you must create new snapper configuration for that, named for example "home" and define its parameters in similar manner as below, but using "-c home" in the commands.
+
+3) Allow syncing of ACLs:
+```sh
+snapper -c root set-config 'SYNC_ACL=yes'
+```
+4) Define limits for maximum of snapshots (used by cleanup algorithms)
+```sh
+snapper -c root set-config "NUMBER_LIMIT=10"
+snapper -c root set-config "NUMBER_LIMIT_IMPORTANT=10"
+```
+5) Edit how many different snapshots for each period you want:
+```sh
+nano /etc/snapper/configs/root
+```
+Find and adjust this section to your liking (this is my configuration)
+```sh
+# limits for timeline cleanup
+TIMELINE_MIN_AGE="1800"
+TIMELINE_LIMIT_HOURLY="2"
+TIMELINE_LIMIT_DAILY="1"
+TIMELINE_LIMIT_WEEKLY="2"
+TIMELINE_LIMIT_MONTHLY="1"
+TIMELINE_LIMIT_YEARLY="0"
+```
+We can create snapshot with snapper also manually, not just via timers:
+```sh
+snapper -c root create --description "default fresh install"
+```
+
+And when you list your snapper snapshots, you should see something like this:
+```sh
+snapper -c root list
+
+  # | Type   | Pre # | Date                            | User | Cleanup | Description           | Userdata
+----+--------+-------+---------------------------------+------+---------+-----------------------+---------
+ 0  | single |       |                                 | root |         | current               |
+12  | single |       | Thu 06 Mar 2025 08:52:05 AM CET | root |         | default fresh install |
+```
+Later when you run the same command, you will see the timeline snapshots appearing as well. Cleanup algorithm runs once a day, which for me is ok, but it can be adjusted if you want.
+
+Finally, when you want to automate snapshots for another subvolume, the steps to take are:
+1) create config
+snapper -c CONF_NAME create-config PATH_WHERE_SUBVOLUME_IS
+*e.g. snapper -c home create-config /home/*
+2) Adjust config for home
+either via snapper -c NAME set-config 'CONFIGURATION_LINE'
+or by direct edits: nano /etc/snapper/configs/NAME
+3) Manual snapshots via snapper can be made:
+snapper -c NAME create --description "Your meaningful description :) "
+
+Step XY - Auto-grub configuration
+This step is even more optional then those before.
+What we will do here is to monitor our /.snapshots directory for new snapshots, and each time there is a new snapshot, a grub menu entry will be created, which will allow you to boot directly into that snapshot. Hopefully you will never need this + this can also be done manually if such situation arises. But on the other hand, why not to save ourselves some time and some googling, and have everything done automatically and ready.
+
+For this to work we will:
+1) Need to install inotify-tools
+option 2a) Either build and install grub-btrfs (for that you'll need to also install git and make), or
+option 2b) Download pre-made deb package from this link (amd64 only)
+*Note: step #2 is required, because for some reason there is no grub-btrfs package in debian repositories. Fortunately, the build itself is very easy, just clone git and run make install. However, I did not want to install anything unnecessary into proxmox installation, so I build myself a deb package on another machine, which you can download and install.*
+
+Step 1)
+apt install inotify-tools
+
+Option 2a)
+apt install git, make
+cd
+git clone
+cd gr
+make install
+cd
+rm -r gr
+
+Option 2b)
+cd
+wget -L wget -L https://github.com/BrandonSk/home-media-docker/raw/refs/heads/master/grub-btrfs-deb/grub-btrfs_1-1_amd64.deb
+
