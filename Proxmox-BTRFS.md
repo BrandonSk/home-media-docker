@@ -410,7 +410,7 @@ snapper -c root list
   # | Type   | Pre # | Date                            | User | Cleanup | Description           | Userdata
 ----+--------+-------+---------------------------------+------+---------+-----------------------+---------
  0  | single |       |                                 | root |         | current               |
-1  | single |       | Thu 06 Mar 2025 08:52:05 AM CET | root |         | default fresh install |
+ 1  | single |       | Thu 06 Mar 2025 08:52:05 AM CET | root |         | default fresh install |
 ```
 
 Later when you run the same command, you will see the timeline snapshots appearing as well. Cleanup algorithm runs once a day, which for me is ok, but it can be adjusted if you want.
