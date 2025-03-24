@@ -1,0 +1,185 @@
+#
+# from: https://jocke.no/2022/02/23/plex-gpu-transcoding-in-docker-on-lxc-on-proxmox/#Docker_container
+#
+# note: make sure to read the end for adjustments in unpriviledged LXC
+
+# better run as root...
+sudo -s
+
+# we need to disable the Nouveau kernel module before we can install NVIDIA drivers
+echo -e "blacklist nouveau\noptions nouveau modeset=0" > /etc/modprobe.d/blacklist-nouveau.conf
+update-initramfs -u
+reboot
+# install packages required to build NVIDIA kernel drivers (only needed on host)
+apt install build-essential
+# install pve headers matching your current kernel
+# older Proxmox versions might need to use "pve-headers-*" rather than "proxmox-headers-*"
+apt install proxmox-headers-$(uname -r)
+# download + install latest nvidia driver
+# the below lines automatically downloads the most current driver
+latest_driver=$(curl -s https://download.nvidia.com/XFree86/Linux-x86_64/latest.txt | awk '{print $2}')
+latest_driver_file=$(echo ${latest_driver} | cut -d'/' -f2)
+curl -O "https://download.nvidia.com/XFree86/Linux-x86_64/${latest_driver}"
+chmod +x ${latest_driver_file}
+./${latest_driver_file} --check
+# answer "no" if it asks if you want to install 32bit compability drivers
+# answer "no" if it asks if it should update X config
+./${latest_driver_file}
+
+# add the following to /etc/udev/rules.d/70-nvidia.rules
+# will create relevant device files within /dev/ during boot
+nano /etc/udev/rules.d/70-nvidia.rules
+	KERNEL=="nvidia", RUN+="/bin/bash -c '/usr/bin/nvidia-smi -L && /bin/chmod 666 /dev/nvidia*'"
+	KERNEL=="nvidia_uvm", RUN+="/bin/bash -c '/usr/bin/nvidia-modprobe -c0 -u && /bin/chmod 0666 /dev/nvidia-uvm*'"
+	SUBSYSTEM=="module", ACTION=="add", DEVPATH=="/module/nvidia", RUN+="/usr/bin/nvidia-modprobe -m"
+
+
+
+# To avoid that the driver/kernel module is unloaded whenever the GPU is not used, we should run the Nvidia provided persistence service. It’s made available to us after the driver install.
+# copy and extract
+cp /usr/share/doc/NVIDIA_GLX-1.0/samples/nvidia-persistenced-init.tar.bz2 .
+bunzip2 nvidia-persistenced-init.tar.bz2
+tar -xf nvidia-persistenced-init.tar
+# remove old, if any (to avoid masked service)
+rm /etc/systemd/system/nvidia-persistenced.service
+# install
+chmod +x nvidia-persistenced-init/install.sh
+./nvidia-persistenced-init/install.sh
+# check that it's ok
+systemctl status nvidia-persistenced.service
+rm -rf nvidia-persistenced-init*
+reboot
+
+
+# After reboot
+sudo -s
+# Check no errors:
+nvidia-smi
+systemctl status nvidia-persistenced.service
+# Check we have device files:
+ls -alh /dev/nvidia*
+# Not needed for transcoding, but for other things (you may later pass these to LXC too)
+ls -alh /dev/dri
+
+# Example output:
+	root@hppl:/home/frodo# ls -alh /dev/nvidia*
+	crw-rw-rw- 1 root root 195,   0 Mar 24 21:39 /dev/nvidia0
+	crw-rw-rw- 1 root root 195, 255 Mar 24 21:39 /dev/nvidiactl
+	crw-rw-rw- 1 root root 195, 254 Mar 24 21:39 /dev/nvidia-modeset
+	crw-rw-rw- 1 root root 234,   0 Mar 24 21:39 /dev/nvidia-uvm
+	crw-rw-rw- 1 root root 234,   1 Mar 24 21:39 /dev/nvidia-uvm-tools
+
+	/dev/nvidia-caps:
+	total 0
+	drw-rw-rw-  2 root root     80 Mar 24 21:39 .
+	drwxr-xr-x 20 root root   4.5K Mar 24 21:40 ..
+	cr--------  1 root root 237, 1 Mar 24 21:39 nvidia-cap1
+	cr--r--r--  1 root root 237, 2 Mar 24 21:39 nvidia-cap2
+
+	root@hppl:/home/frodo# ls -alh /dev/dri
+	total 0
+	drwxr-xr-x  3 root root        120 Mar 24 21:39 .
+	drwxr-xr-x 20 root root       4.5K Mar 24 21:40 ..
+	drwxr-xr-x  2 root root        100 Mar 24 21:39 by-path
+	crw-rw----  1 root video  226,   0 Mar 24 21:39 card0
+	crw-rw----  1 root video  226,   1 Mar 24 21:39 card1
+	crw-rw----  1 root render 226, 128 Mar 24 21:39 renderD128
+
+
+# !
+# From above listings note the numbers in the 5th column (195, 234, 237, 226)
+# ... -> and use them in the next step
+
+# READY to move on to passing to LXC container...
+# (1) Shutdown your container
+# (2) Replace the 100 number with correct LXC container ID
+nano -w /etc/pve/lxc/100.conf
+
+	lxc.cgroup2.devices.allow: c 195:* rwm
+	lxc.cgroup2.devices.allow: c 234:* rwm
+	lxc.cgroup2.devices.allow: c 237:* rwm
+	# if you want to use the card for other things than transcoding
+	
+	# mount nvidia devices into LXC container
+	lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
+	lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
+	lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,create=file
+	lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
+	lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
+	lxc.mount.entry: /dev/nvidia-caps/nvidia-cap1 dev/nvidia-caps/nvidia-cap1 none bind,optional,create=file
+	lxc.mount.entry: /dev/nvidia-caps/nvidia-cap2 dev/nvidia-caps/nvidia-cap2 none bind,optional,create=file
+	# add /dev/dri cgroup values as well
+	# if you want to use the card for other things than transcoding
+	# mount entries for files in /dev/dri should probably also be added
+	lxc.cgroup2.devices.allow: c 226:* rwm
+	lxc.cgroup2.devices.allow: c 226:* rwm
+	lxc.cgroup2.devices.allow: c 29:* rwm
+	lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
+	lxc.mount.entry: /dev/dri/card0 dev/dri/card0 none bind,optional,create=file
+	lxc.mount.entry: /dev/dri/card1 dev/dri/card1 none bind,optional,create=file
+	lxc.mount.entry: /dev/dri/renderD128 dev/renderD128 none bind,optional,create=file
+
+# Save and start the container
+# Now we will install drivers within the container, but wothout kernel modules.
+sudo -s
+# the below lines automatically downloads the most current driver
+latest_driver=$(curl -s https://download.nvidia.com/XFree86/Linux-x86_64/latest.txt | awk '{print $2}')
+latest_driver_file=$(echo ${latest_driver} | cut -d'/' -f2)
+curl -O "https://download.nvidia.com/XFree86/Linux-x86_64/${latest_driver}"
+chmod +x ${latest_driver_file}
+./${latest_driver_file} --check
+# answer "no" if it asks if you want to install 32bit compability drivers
+# answer "no" if it asks if it should update X config
+./${latest_driver_file} --no-kernel-module
+# Reboot the container (!)
+reboot
+
+# After reboot verify within the LXC the drivers are working
+ls -alh /dev/nvidia*
+ls -alh /dev/dri
+nvidia-smi
+
+
+# ONTO THE DOCKER
+# (My docker is installed via the Deployrr app from simplehomelab.com, so I am skipping
+# steps related to docker and coker compose installation.)
+
+# install docker-compose bash completion
+curl \
+-L https://raw.githubusercontent.com/docker/cli/master/contrib/completion/bash/docker \
+-o /etc/bash_completion.d/docker-compose
+
+# install NVIDIA Container Toolkit
+apt install -y curl
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+apt update
+apt install nvidia-container-toolkit
+
+# restart systemd + docker (if you don't reload systemd, it might not work)
+systemctl daemon-reload
+systemctl restart docker
+
+# Now all should be set.
+# You may test via containers (see original guide link at the beginning)
+
+# But modification to the plex compose file is required:
+# Add just above networks section:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+# And in environment section add last two lines:
+    environment:
+      TZ: $TZ
+      HOSTNAME: $PLEX_SERVER_NAME
+      PLEX_CLAIM_FILE: /run/secrets/plex_claim
+      PLEX_UID: $PUID
+      PLEX_GID: $PGID
+      ADVERTISE_IP: "http://$SERVER_LAN_IP:32400/,https://.$DOMAINNAME_1/"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+
+# Recreate the plex container and enjoy HW transcoding!
