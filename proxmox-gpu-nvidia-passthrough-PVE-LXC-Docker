@@ -98,7 +98,6 @@ nano -w /etc/pve/lxc/100.conf
 	lxc.cgroup2.devices.allow: c 195:* rwm
 	lxc.cgroup2.devices.allow: c 234:* rwm
 	lxc.cgroup2.devices.allow: c 237:* rwm
-	# if you want to use the card for other things than transcoding
 	
 	# mount nvidia devices into LXC container
 	lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
@@ -108,6 +107,7 @@ nano -w /etc/pve/lxc/100.conf
 	lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
 	lxc.mount.entry: /dev/nvidia-caps/nvidia-cap1 dev/nvidia-caps/nvidia-cap1 none bind,optional,create=file
 	lxc.mount.entry: /dev/nvidia-caps/nvidia-cap2 dev/nvidia-caps/nvidia-cap2 none bind,optional,create=file
+	# if you want to use the card for other things than transcoding
 	# add /dev/dri cgroup values as well
 	# if you want to use the card for other things than transcoding
 	# mount entries for files in /dev/dri should probably also be added
