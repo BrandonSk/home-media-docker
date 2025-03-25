@@ -183,3 +183,8 @@ systemctl restart docker
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
 
 # Recreate the plex container and enjoy HW transcoding!
+
+# Unpriviledged LXC - note - In the original guide you can find comments about necessary edits in order to
+# make direct access to device working (see comments that talk about " setting ‘no-cgroups = true’ "). 
+# When I performed the above steps, the extra editing of the file was not necessary,
+# as it was already correctly modified. But you should always double check...
